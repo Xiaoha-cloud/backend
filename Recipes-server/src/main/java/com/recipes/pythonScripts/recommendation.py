@@ -3,19 +3,13 @@ import pandas as pd
 import json
 import sys
 from ast import literal_eval
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text as sql_text
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from surprise import Dataset, Reader, SVD, accuracy
-from surprise.model_selection import train_test_split, GridSearchCV
+from surprise.model_selection import train_test_split
 
-import pandas as pd
-import json
-import sys
-from ast import literal_eval
-from sqlalchemy import create_engine, text as sql_text
-
-# 数据库连接信息
+# Database connection configuration
 db_config = {
     'user': 'root',
     'password': 'Macair0313',
@@ -23,10 +17,10 @@ db_config = {
     'database': 'simulaterecipes'
 }
 
-# 使用 SQLAlchemy 创建数据库引擎
+# Create database engine using SQLAlchemy
 engine = create_engine(f"mysql+pymysql://{db_config['user']}:{db_config['password']}@{db_config['host']}/{db_config['database']}")
 
-# 验证数据库连接是否成功
+# Check if the database connection is successful
 try:
     with engine.connect() as connection:
         result = connection.execute(sql_text("SELECT 1"))
@@ -37,13 +31,13 @@ except Exception as e:
 
 def fetch_data():
     try:
-        # 从数据库中读取 recipes 表格数据
+        # Load data from 'Recipes' table
         recipes_query = "SELECT id, title, minutes, nutrition, directions, ingredients FROM Recipes"
         recipes_df = pd.read_sql_query(sql=sql_text(recipes_query), con=engine.connect())
         print("Fetched recipes data", file=sys.stderr)
         print("Recipes DataFrame columns:", recipes_df.columns, file=sys.stderr)
 
-        # 从数据库中读取 comments 表格数据
+        # Load data from 'Comment' table
         comments_query = "SELECT recipe_id, user_id, rating FROM Comment"
         comments_df = pd.read_sql_query(sql=sql_text(comments_query), con=engine.connect())
         print("Fetched comments data", file=sys.stderr)
@@ -56,24 +50,24 @@ def fetch_data():
 
 def preprocess_data(recipes_df, comments_df):
     try:
-        # 重命名 id 列为 recipe_id
+        # Rename 'id' column to 'recipe_id'
         recipes_df = recipes_df.rename(columns={'id': 'recipe_id'})
 
-        # 解析 nutrition 列为 JSON
+        # Parse 'nutrition' column from JSON
         recipes_df['nutrition'] = recipes_df['nutrition'].apply(lambda x: literal_eval(x) if isinstance(x, str) else x)
         nutrition_columns = ['calories', 'total_fat_PDV', 'sugar_PDV', 'sodium_PDV', 'protein_PDV', 'saturated_fat_PDV', 'carbohydrates_PDV']
 
-        # 将 nutrition JSON 数据展开到单独的列
+        # Expand nutrition JSON to individual columns
         recipes_df[nutrition_columns] = pd.DataFrame(recipes_df['nutrition'].tolist(), index=recipes_df.index)
 
-        # 删除重复项
+        # Drop duplicate rows
         recipes_df = recipes_df.drop_duplicates(subset=['recipe_id', 'title', 'minutes', 'directions'])
 
-        # 过滤掉 calories 或 minutes 为 0 的数据
+        # Filter out entries where calories or minutes are zero
         recipes_df = recipes_df[(recipes_df['calories'] != 0) & (recipes_df['minutes'] != 0)]
         recipes_df = recipes_df[(recipes_df[nutrition_columns] != 0).any(axis=1)]
 
-        # 去除离群值
+        # Remove outliers
         numerical_columns = recipes_df.select_dtypes(include=['number']).drop(['recipe_id'], axis=1).columns.tolist()
         Q1 = recipes_df[numerical_columns].quantile(0.25)
         Q3 = recipes_df[numerical_columns].quantile(0.75)
@@ -82,86 +76,28 @@ def preprocess_data(recipes_df, comments_df):
         for col in numerical_columns:
             recipes_df = recipes_df[~(recipes_df[col] > upper_limit[col])]
 
-        # 过滤掉 rating 为 0 的数据
+        # Filter out ratings with value 0
         comments_df = comments_df[comments_df['rating'] != 0]
 
-        # 合并 recipes 和 comments 数据框
+        # Merge recipes and comments DataFrames
         merged_df = pd.merge(recipes_df, comments_df, on='recipe_id', how='inner')
 
-        # 计算每个 recipe 的平均评分和评分数量
+        # Aggregate rating statistics
         agg_ratings_byrecipe = merged_df.groupby('recipe_id').agg(mean_rating=('rating', 'mean'), number_of_ratings=('rating', 'count')).reset_index()
 
-        # 合并 recipes 和聚合评分数据
+        # Merge with recipe data
         KB_df = pd.merge(recipes_df, agg_ratings_byrecipe, on='recipe_id', how='inner')
 
-        # 解析 ingredients 列为 JSON
+        # Parse 'ingredients' column from JSON
         KB_df['ingredients'] = KB_df['ingredients'].fillna('[]')
         KB_df['ingredients'] = KB_df['ingredients'].apply(lambda x: literal_eval(x) if isinstance(x, str) else x)
         KB_df['ingredients'] = KB_df['ingredients'].apply(lambda x: [ingredient.lower() for ingredient in x] if isinstance(x, list) else [])
 
-        # 打印处理后的列名
         print("Preprocessed data columns:", KB_df.columns, file=sys.stderr)
-
         return KB_df, comments_df
     except Exception as e:
         print(f"Error preprocessing data: {e}", file=sys.stderr)
         return pd.DataFrame(), pd.DataFrame()
-
-
-
-def preprocess_data(recipes_df, comments_df):
-    try:
-        # 重命名 id 列为 recipe_id
-        recipes_df = recipes_df.rename(columns={'id': 'recipe_id'})
-
-        # 解析 nutrition 列为 JSON
-        recipes_df['nutrition'] = recipes_df['nutrition'].apply(lambda x: literal_eval(x) if isinstance(x, str) else x)
-        nutrition_columns = ['calories', 'total_fat_PDV', 'sugar_PDV', 'sodium_PDV', 'protein_PDV', 'saturated_fat_PDV', 'carbohydrates_PDV']
-
-        # 将 nutrition JSON 数据展开到单独的列
-        recipes_df[nutrition_columns] = pd.DataFrame(recipes_df['nutrition'].tolist(), index=recipes_df.index)
-
-        # 删除重复项
-        recipes_df = recipes_df.drop_duplicates(subset=['recipe_id', 'title', 'minutes', 'directions'])
-
-        # 过滤掉 calories 或 minutes 为 0 的数据
-        recipes_df = recipes_df[(recipes_df['calories'] != 0) & (recipes_df['minutes'] != 0)]
-        recipes_df = recipes_df[(recipes_df[nutrition_columns] != 0).any(axis=1)]
-
-        # 去除离群值
-        numerical_columns = recipes_df.select_dtypes(include=['number']).drop(['recipe_id'], axis=1).columns.tolist()
-        Q1 = recipes_df[numerical_columns].quantile(0.25)
-        Q3 = recipes_df[numerical_columns].quantile(0.75)
-        IQR = Q3 - Q1
-        upper_limit = Q3 + 1.5 * IQR
-        for col in numerical_columns:
-            recipes_df = recipes_df[~(recipes_df[col] > upper_limit[col])]
-
-        # 过滤掉 rating 为 0 的数据
-        comments_df = comments_df[comments_df['rating'] != 0]
-
-        # 合并 recipes 和 comments 数据框
-        merged_df = pd.merge(recipes_df, comments_df, on='recipe_id', how='inner')
-
-        # 计算每个 recipe 的平均评分和评分数量
-        agg_ratings_byrecipe = merged_df.groupby('recipe_id').agg(mean_rating=('rating', 'mean'), number_of_ratings=('rating', 'count')).reset_index()
-
-        # 合并 recipes 和聚合评分数据
-        KB_df = pd.merge(recipes_df, agg_ratings_byrecipe, on='recipe_id', how='inner')
-
-        # 解析 ingredients 列为 JSON
-        KB_df['ingredients'] = KB_df['ingredients'].fillna('[]')
-        KB_df['ingredients'] = KB_df['ingredients'].apply(lambda x: literal_eval(x) if isinstance(x, str) else x)
-        KB_df['ingredients'] = KB_df['ingredients'].apply(lambda x: [ingredient.lower() for ingredient in x] if isinstance(x, list) else [])
-
-        # 打印处理后的列名
-        print("Preprocessed data columns:", KB_df.columns, file=sys.stderr)
-
-        return KB_df, comments_df
-    except Exception as e:
-        print(f"Error preprocessing data: {e}", file=sys.stderr)
-        return pd.DataFrame(), pd.DataFrame()
-
 
 def filter_recipes_by_preferences(KB_df, preferences):
     matching_recipes = KB_df.copy()
@@ -202,14 +138,19 @@ def calculate_and_sort_scores(KB_df, preference, nutritional_preferences=None):
 
 def calculate_score(recipe, C, m, preference, nutritional_preferences=None):
     try:
-        score = 0  # 用来存储计算出来的分数
+        score = 0  # Score accumulator
 
         if preference == '4':
-            score = (recipe['number_of_ratings'] / (recipe['number_of_ratings'] + m) * recipe['mean_rating']) + (m / (m + recipe['number_of_ratings']) * C)
+            score = (recipe['number_of_ratings'] / (recipe['number_of_ratings'] + m) * recipe['mean_rating']) + \
+                    (m / (m + recipe['number_of_ratings']) * C)
         elif preference == '5':
-            score = -recipe['calories'] + (recipe['number_of_ratings'] / (recipe['number_of_ratings'] + m) * recipe['mean_rating']) + (m / (m + recipe['number_of_ratings']) * C)
+            score = -recipe['calories'] + \
+                    (recipe['number_of_ratings'] / (recipe['number_of_ratings'] + m) * recipe['mean_rating']) + \
+                    (m / (m + recipe['number_of_ratings']) * C)
         elif preference == '6':
-            score = recipe['calories'] + (recipe['number_of_ratings'] / (recipe['number_of_ratings'] + m) * recipe['mean_rating']) + (m / (m + recipe['number_of_ratings']) * C)
+            score = recipe['calories'] + \
+                    (recipe['number_of_ratings'] / (recipe['number_of_ratings'] + m) * recipe['mean_rating']) + \
+                    (m / (m + recipe['number_of_ratings']) * C)
         elif preference == '7' and nutritional_preferences:
             for pref in nutritional_preferences:
                 nutrient, condition = [part.strip() for part in pref.split('(')]
@@ -217,19 +158,21 @@ def calculate_score(recipe, C, m, preference, nutritional_preferences=None):
                 column_name = f"{nutrient}_PDV"
                 if column_name in recipe.index:
                     if condition == 'low':
-                        score += -recipe[column_name] + (recipe['number_of_ratings'] / (recipe['number_of_ratings'] + m) * recipe['mean_rating']) + (m / (m + recipe['number_of_ratings']) * C)
+                        score += -recipe[column_name] + \
+                                 (recipe['number_of_ratings'] / (recipe['number_of_ratings'] + m) * recipe['mean_rating']) + \
+                                 (m / (m + recipe['number_of_ratings']) * C)
                     elif condition == 'high':
-                        score += recipe[column_name] + (recipe['number_of_ratings'] / (recipe['number_of_ratings'] + m) * recipe['mean_rating']) + (m / (m + recipe['number_of_ratings']) * C)
+                        score += recipe[column_name] + \
+                                 (recipe['number_of_ratings'] / (recipe['number_of_ratings'] + m) * recipe['mean_rating']) + \
+                                 (m / (m + recipe['number_of_ratings']) * C)
 
-
-        # 打印调试信息，查看计算的每个部分
+        # Debug output
         print(f"Recipe ID: {recipe['recipe_id']}, Score: {score}, Number of Ratings: {recipe['number_of_ratings']}, Mean Rating: {recipe['mean_rating']}, Calories: {recipe['calories']}, m: {m}, C: {C}", file=sys.stderr)
 
         return score
     except Exception as e:
         print(f"Error calculating score: {e}", file=sys.stderr)
         return 0
-
 
 def collaborative_filtering(comments_df):
     try:
@@ -272,9 +215,9 @@ def recommend(user_preferences):
         if recommendations.empty:
             recipe_id = recipes_df['recipe_id'].sample().tolist()[0]
             content_recs = content_based_filtering(KB_df, recipe_id, 5)
-            result = content_recs['recipe_id'].tolist()  # 返回推荐的食谱ID列表
+            result = content_recs['recipe_id'].tolist()
         else:
-            result = recommendations['recipe_id'].head(5).tolist()  # 返回前5个推荐的食谱ID
+            result = recommendations['recipe_id'].head(5).tolist()
         return result
     except Exception as e:
         print(f"Error in recommend function: {e}", file=sys.stderr)
